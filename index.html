@@ -48,9 +48,9 @@
           <div class="toggle-group filter-swatch-group" id="shader-source-group" role="radiogroup" aria-labelledby="lbl-shader-source"></div>
           <div class="section-label" id="lbl-shader-res">Shader Res</div>
           <div class="toggle-group" id="shader-res-group" role="radiogroup" aria-labelledby="lbl-shader-res">
-            <button class="toggle-btn active" type="button" role="radio" aria-checked="true"  data-value="landscape" data-tip="1920×1080 landscape.">16:9</button>
-            <button class="toggle-btn"        type="button" role="radio" aria-checked="false" data-value="square"    data-tip="1080×1080 square.">1:1</button>
-            <button class="toggle-btn"        type="button" role="radio" aria-checked="false" data-value="vertical"  data-tip="1080×1920 vertical.">9:16</button>
+            <button class="toggle-btn active" type="button" role="radio" aria-checked="true"  data-value="landscape" data-tip="1280×720 landscape.">16:9</button>
+            <button class="toggle-btn"        type="button" role="radio" aria-checked="false" data-value="square"    data-tip="720×720 square.">1:1</button>
+            <button class="toggle-btn"        type="button" role="radio" aria-checked="false" data-value="vertical"  data-tip="720×1280 vertical.">9:16</button>
           </div>
           <!-- Per-shader knobs — built by renderShaderKnobs() from the active
                SHADER_SOURCES entry's `knobs` array; hidden unless a shader
@@ -473,6 +473,12 @@
             <button id="btn-fps"      class="icon-btn" type="button" title="Toggle FPS overlay">FPS</button>
             <button id="btn-help"     class="icon-btn" type="button" title="Keyboard shortcuts (?)">?</button>
             <button id="btn-mute"     class="icon-btn" type="button" title="Mute / unmute the source video's audio" disabled>Unmute</button>
+            <select id="export-res-select" class="icon-btn" title="Export resolution">
+              <option value="display">DISP</option>
+              <option value="720p">720p</option>
+              <option value="1080p">1080p</option>
+              <option value="4k">4K</option>
+            </select>
             <button id="btn-snapshot" class="icon-btn" type="button" title="Save current frame as PNG" disabled>Snap</button>
             <button id="btn-record"   class="icon-btn" type="button" title="Record canvas as a video clip (click again to stop)" disabled><span class="rec-dot" aria-hidden="true"></span><span id="btn-record-label">Rec</span></button>
             <button id="btn-export"   class="icon-btn" type="button" title="High-quality MP4 export (WebCodecs)" disabled>Export</button>
@@ -554,11 +560,12 @@
         <div class="intro-kicker">NEW INSTRUMENT</div>
         <h2 id="intro-title">Meet LumiSynth</h2>
         <p id="intro-copy">
-          Drop a video or open the camera. STRUCTURE shapes the image, COLOR stacks tone,
-          TRACK finds motion, and every knob responds as you move it.
+          Drop a video, open the camera, or pick a generative shader. STRUCTURE reshapes geometry,
+          COLOR tones the image, GRADE fine-tunes hue and saturation, FX RACK adds feedback trails —
+          and TRACK finds motion in anything.
         </p>
         <p>
-          Start simple: load a clip, pick one STRUCTURE, add one COLOR slot, then turn knobs until the canvas answers.
+          Start simple: load a source, pick one STRUCTURE, choose a COLOR, then turn knobs until the canvas answers.
         </p>
         <button id="intro-start" class="intro-action" type="button">Start playing</button>
       </div>

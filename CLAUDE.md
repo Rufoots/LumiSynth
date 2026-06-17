@@ -164,7 +164,9 @@ Exported API:
 | `src/glContext.js` | Shared GL context + chain FBO allocator. Read the contract comment at the top before touching any GL module |
 | `src/glCompose.js` | STRUCTURE → COLOR compose pass (screen-blend STRUCTURE output over raw video) |
 | `src/glFilters.js` | Stateless full-frame GL effects: all COLOR maps + unique effects, `chroma` (ChromaEngine), the internal `grade` pass, the stateless FX RACK effects, and most STRUCTURE shaders |
-| `src/glFx.js` | FX RACK effects — stateful GL feedback passes (flowfield). Per-slot ping-pong feedback FBOs keyed by slot id; `resetFxFeedback()` wired into resetAllState + slot mutations |
+| `src/glFx.js` | FX RACK feedback effects — flowfield, drag, lumadrag, tunnel, burnin, wobbletape. Per-slot ping-pong FBOs keyed by slot id; `resetFxFeedback()` wired into resetAllState + slot mutations |
+| `src/shaderSource.js` | Generative GLSL source library (diveclouds, phantomstar, starnest, hyperkart). Own GL context; renders into canvas fed to pipeline as video substitute. Registry-driven knob panel; Speed knobs drive accumulated phase clock |
+| `vite.config.js` | Vite build config |
 | `src/blobDetector.js` | CPU blob detection, all 6 modes |
 | `src/kalman.js` | 1D Kalman filter + nearest-neighbour tracker |
 | `src/overlays.js` | Canvas 2D track overlay: shapes, labels, connection lines, Track FX |

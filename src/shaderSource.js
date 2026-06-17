@@ -31,8 +31,8 @@
  * to 8 controls — no 4-knob ceiling). Knob values are runtime state, kept
  * per-slug, not part of saved looks.
  *
- * Resolution presets (SHADER_RES) are 1080p-class: landscape 1920×1080,
- * square 1080×1080, vertical 1080×1920.
+ * Resolution presets (SHADER_RES) default to 720p-class for integrated GPU
+ * compatibility. Users can switch to 1080p in the UI.
  */
 
 const VERT = `#version 300 es
@@ -98,7 +98,7 @@ void main() {
   float cloudLo = mix(0.75, 0.30, coverage);   // Coverage slides the cloud threshold
 
   vec4 sum = vec4(0.0);
-  for (float depth = 0.0; depth < 100000.0; depth += 220.0) {
+  for (float depth = 0.0; depth < 100000.0; depth += 380.0) {
     vec3 ray = campos + fragAt * depth;
     if (cloudrange.x < ray.y && ray.y < cloudrange.y) {
       float alpha = smoothstep(cloudLo, 1.0, fbm(ray * 0.00025));
@@ -106,7 +106,7 @@ void main() {
       alpha = (1.0 - sum.a) * alpha;
       sum += vec4(localcolor * alpha, alpha);
     }
-    if (sum.a > 0.99) break;
+    if (sum.a > 0.97) break;
   }
 
   float alpha = smoothstep(0.7, 1.0, sum.a);
@@ -197,7 +197,7 @@ void main() {
   vec3 ray   = normalize(cSide * p.x + cUp * p.y + cDir);
 
   float acc = 0.0, acc2 = 0.0, t = 0.0;
-  for (int i = 0; i < 99; i++) {
+  for (int i = 0; i < 72; i++) {
     vec3 pos = cPos + ray * t;
     float dist = map(pos, sym, morph);
     dist = max(abs(dist), 0.02);
@@ -232,8 +232,8 @@ uniform float uParams[8];
 out vec4 fragColor;
 // [0] Zoom [1] Warp [2] Tile [3] Bright [4] DarkMatter [5] Saturation [6] Spin
 
-#define iterations 17
-#define volsteps 20
+#define iterations 14
+#define volsteps 16
 #define stepsize 0.1
 #define distfading 0.730
 
@@ -350,7 +350,7 @@ void main() {
        D = N(vec3(R(sin(T * .005) * roll * .4) * u, 1) * mat3(-X, cross(X, Z), Z));
 
   float i = 0., s = 0., d = 0.;
-  for (; i++ < 128.;)
+  for (; i++ < 96.;)
     p = ro + D * d,
     d += s = map(p) * .8,
     o += lights + 1. / max(s, .01);
@@ -366,7 +366,7 @@ void main() {
 
   vec4 ref = vec4(0);
   lights = vec4(0);
-  for (p += n * .05, D = reflect(D, n), s = i = 0.; i++ < 4e1;)
+  for (p += n * .05, D = reflect(D, n), s = i = 0.; i++ < 3e1;)
     p += D * s,
     s = map(p) * .8,
     ref += lights + 1. / max(s, .01);
@@ -475,9 +475,9 @@ export const SHADER_SOURCES = [
 ];
 
 export const SHADER_RES = {
-  landscape: { w: 1920, h: 1080, label: '16:9' },
-  square:    { w: 1080, h: 1080, label: '1:1'  },
-  vertical:  { w: 1080, h: 1920, label: '9:16' },
+  landscape: { w: 1280, h:  720, label: '16:9' },
+  square:    { w:  720, h:  720, label: '1:1'  },
+  vertical:  { w:  720, h: 1280, label: '9:16' },
 };
 
 let M = null; // { canvas, gl, vao, progs: {slug: {prog,time,res,params}}, slug, w, h, phase, lastNow }
@@ -524,7 +524,11 @@ function compile(gl, type, src) {
 function ensureModule() {
   if (M) return M;
   const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, alpha: false });
+  // preserveDrawingBuffer: false — the fast double-buffer swap path. Safe here
+  // because all reads (ctx.drawImage, offCtx.drawImage, gl.texSubImage2D in
+  // glContext) happen within the same RAF tick before the browser composites,
+  // so the framebuffer contents are always available when we need them.
+  const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: false, alpha: false });
   if (!gl) {
     console.warn('[shaderSource] WebGL2 not supported');
     return null;
@@ -537,7 +541,7 @@ function ensureModule() {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
-  M = { canvas, gl, vao, progs: Object.create(null), slug: null, w: 0, h: 0, phase: 0, lastNow: null };
+  M = { canvas, gl, vao, progs: Object.create(null), slug: null, def: null, w: 0, h: 0, phase: 0, lastNow: null };
   return M;
 }
 
@@ -574,6 +578,7 @@ export function setShaderSource(slug, w, h) {
   if (!m) return false;
   if (!getProgram(slug)) return false;
   m.slug = slug;
+  m.def  = SHADER_SOURCES.find((s) => s.slug === slug) || null;
   if (m.w !== w || m.h !== h) {
     m.canvas.width = w;
     m.canvas.height = h;
@@ -605,10 +610,10 @@ export function renderShaderSourceFrame() {
   if (entry.res != null) gl.uniform2f(entry.res, w, h);
   if (entry.params != null) {
     // Non-speed knobs upload into uParams[] in registry declaration order.
-    const def = SHADER_SOURCES.find((s) => s.slug === M.slug);
+    // M.def is cached on slug change — no linear search per frame.
     _paramBuf.fill(0);
     let i = 0;
-    for (const k of def?.knobs || []) {
+    for (const k of M.def?.knobs || []) {
       if (k.key === 'speed') continue;
       if (i < PARAM_SLOTS) _paramBuf[i++] = store[k.key] ?? k.default;
     }

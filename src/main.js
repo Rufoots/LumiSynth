@@ -58,9 +58,12 @@ const canvasArea   = document.getElementById('canvas-area');
 const fileStatus   = document.getElementById('file-status');
 const topbarSource = document.getElementById('topbar-source');
 const toastRegion  = document.getElementById('toast-region');
-const btnSnapshot  = document.getElementById('btn-snapshot');
-const btnRecord    = document.getElementById('btn-record');
-const btnRecordLbl = document.getElementById('btn-record-label');
+const btnSnapshot      = document.getElementById('btn-snapshot');
+const btnRecord        = document.getElementById('btn-record');
+const btnRecordLbl     = document.getElementById('btn-record-label');
+const exportResSelect  = document.getElementById('export-res-select');
+let exportResKey = 'display';
+exportResSelect?.addEventListener('change', () => { exportResKey = exportResSelect.value; });
 const btnReset     = document.getElementById('btn-reset');
 const btnFps       = document.getElementById('btn-fps');
 const btnHelp      = document.getElementById('btn-help');
@@ -785,6 +788,7 @@ authCode?.addEventListener('keydown', (e) => {
 
 // ---- Knob component ----
 const knobRegistry = new Map();   // id -> { setValue, getValue, min, max, step, default, stateKey, el }
+let _knobDragActive = false;
 
 // initKnob has two modes:
 //   1. Default (no opts): wires the knob to global `state[stateKey]`,
@@ -962,6 +966,7 @@ function initKnob(el, opts = {}) {
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     dragging = true;
+    _knobDragActive = true;
     lastY = e.clientY;
     el.setPointerCapture(e.pointerId);
     el.classList.add('dragging');
@@ -980,6 +985,7 @@ function initKnob(el, opts = {}) {
   const stopDrag = (e) => {
     if (!dragging) return;
     dragging = false;
+    _knobDragActive = false;
     el.releasePointerCapture(e.pointerId);
     el.classList.remove('dragging');
   };
@@ -2668,13 +2674,21 @@ async function takeSnapshot() {
     return;
   }
   if (!(await requireExportAccess('snapshot'))) return;
+  const exportDims = getExportDimensions();
+  if (exportDims) {
+    canvas.width  = exportDims.w;
+    canvas.height = exportDims.h;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
   canvas.toBlob((blob) => {
+    if (exportDims) resizeCanvas();
     if (!blob) { showToast('Snapshot failed', 'error'); return; }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const ts = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+    const qual = exportResKey === 'display' ? 'disp' : exportResKey;
     a.href = url;
-    a.download = `lumisynth-${ts}.png`;
+    a.download = `lumisynth-${qual}-${ts}.png`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2745,12 +2759,13 @@ function formatRecordTime(ms) {
   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 }
 
-function tickRecordLabel() {
+let _recordTickLast = 0;
+function tickRecordLabel(now) {
   if (!_recorder) return;
-  btnRecordLbl.textContent = formatRecordTime(performance.now() - _recordStartT);
-  // Re-schedule via RAF so the label updates piggyback on the render
-  // loop's existing cadence — no separate setInterval timer to manage
-  // or leak across recording sessions.
+  if (now - _recordTickLast >= 500) {
+    btnRecordLbl.textContent = formatRecordTime(now - _recordStartT);
+    _recordTickLast = now;
+  }
   _recordTickRaf = requestAnimationFrame(tickRecordLabel);
 }
 
@@ -2766,6 +2781,12 @@ async function startRecording() {
     showToast('Recording not supported in this browser', 'error');
     return;
   }
+  const exportDims = getExportDimensions();
+  if (exportDims) {
+    canvas.width  = exportDims.w;
+    canvas.height = exportDims.h;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
   // captureStream pulls frames from the canvas at the rate we draw to
   // it (capped at FPS_CAP). The 60 here is a hint to the browser, not
   // a guarantee — actual rate matches our render loop.
@@ -2773,11 +2794,13 @@ async function startRecording() {
   try {
     stream = canvas.captureStream(FPS_CAP);
   } catch (err) {
+    if (exportDims) resizeCanvas();
     showToast(`Couldn't capture canvas: ${err.message || err}`, 'error');
     return;
   }
+  const bitsPerSecond = { '720p': 8_000_000, '1080p': 16_000_000, '4k': 50_000_000 }[exportResKey] ?? 8_000_000;
   try {
-    _recorder = new MediaRecorder(stream, { mimeType: _recordFormat.mime });
+    _recorder = new MediaRecorder(stream, { mimeType: _recordFormat.mime, videoBitsPerSecond: bitsPerSecond });
   } catch (err) {
     showToast(`Recorder init failed: ${err.message || err}`, 'error');
     _recorder = null;
@@ -2821,6 +2844,7 @@ function finalizeRecording() {
   const fmt    = _recordFormat;
   const durMs  = performance.now() - _recordStartT;
   teardownRecording();
+  resizeCanvas();
 
   if (!chunks.length) {
     showToast('Recording produced no data', 'error');
@@ -2829,9 +2853,10 @@ function finalizeRecording() {
   const blob = new Blob(chunks, { type: fmt.mime.split(';')[0] });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
-  const ts   = new Date().toISOString().replace(/[:.]/g, '-');
+  const ts   = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+  const qual = exportResKey === 'display' ? 'disp' : exportResKey;
   a.href = url;
-  a.download = `lumisynth-${ts}.${fmt.ext}`;
+  a.download = `lumisynth-${qual}-${ts}.${fmt.ext}`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -3722,6 +3747,7 @@ function setHasSource(val, label) {
 // ---- Timeline segments (video-only hard cuts) ----
 let _lastResolvedTimelineSegmentId = null;
 let _lastResolvedTimelineRuntimeSig = '';
+let _lastPlayheadActiveId = undefined;
 let _timelineApplyingLook = false;
 
 function timelineAvailable() {
@@ -3795,8 +3821,11 @@ function updateTimelinePlayhead(time = video.currentTime, activeId = _lastResolv
   }
   const pct = clamp(time / video.duration, 0, 1) * 100;
   timelinePlayhead.style.left = `${pct}%`;
-  for (const el of timelineTrack.querySelectorAll('.timeline-segment')) {
-    el.classList.toggle('is-active', el.dataset.segmentId === activeId);
+  if (activeId !== _lastPlayheadActiveId) {
+    _lastPlayheadActiveId = activeId;
+    for (const el of timelineTrack.querySelectorAll('.timeline-segment')) {
+      el.classList.toggle('is-active', el.dataset.segmentId === activeId);
+    }
   }
 }
 
@@ -3806,6 +3835,7 @@ function renderTimelinePanel() {
   timelinePanel.classList.toggle('hidden', state.sourceKind !== 'video');
   timelinePanel.classList.toggle('is-disabled', !available);
   timelineTrack.innerHTML = '';
+  _lastPlayheadActiveId = undefined;
 
   if (!available) {
     setTimelineDisabled(true);
@@ -4118,6 +4148,16 @@ if (inkHighInput) {
 }
 
 // ---- Canvas sizing ----
+function getExportDimensions() {
+  const heights = { '720p': 720, '1080p': 1080, '4k': 2160 };
+  const targetH = heights[exportResKey];
+  if (!targetH) return null;
+  const sw = activeSourceWidth();
+  const sh = activeSourceHeight();
+  const ratio = sw && sh ? sw / sh : 16 / 9;
+  return { w: Math.round(targetH * ratio), h: targetH };
+}
+
 function resizeCanvas() {
   const aw = canvasArea.clientWidth;
   const ah = canvasArea.clientHeight;
@@ -4640,6 +4680,7 @@ document.body.appendChild(helpTip);
 
 let _helpTipShowTimer = 0;
 let _helpTipCurrentEl = null;
+let _helpTipRect = null;
 const HELP_TIP_DELAY = 350;
 const HELP_TIP_OFFSET_X = 14;
 const HELP_TIP_OFFSET_Y = 18;
@@ -4653,7 +4694,8 @@ function findTipAncestor(el) {
 }
 
 function positionHelpTip(cursorX, cursorY) {
-  const rect = helpTip.getBoundingClientRect();
+  if (!_helpTipRect) _helpTipRect = helpTip.getBoundingClientRect();
+  const rect = _helpTipRect;
   let x = cursorX + HELP_TIP_OFFSET_X;
   let y = cursorY + HELP_TIP_OFFSET_Y;
   if (x + rect.width > window.innerWidth - 8) x = cursorX - rect.width - HELP_TIP_OFFSET_X;
@@ -4672,7 +4714,7 @@ function hideHelpTip() {
 
 document.addEventListener('mousemove', (e) => {
   // Don't fight the knob-val tooltip during a drag.
-  if (document.querySelector('.knob.dragging')) {
+  if (_knobDragActive) {
     if (_helpTipCurrentEl) hideHelpTip();
     return;
   }
@@ -4685,6 +4727,7 @@ document.addEventListener('mousemove', (e) => {
   if (el !== _helpTipCurrentEl) {
     _helpTipCurrentEl = el;
     helpTip.textContent = el.dataset.tip;
+    _helpTipRect = null;
     if (helpTip.classList.contains('visible')) {
       // Already visible — just swap content, no re-delay.
     } else {
@@ -4905,5 +4948,26 @@ canvas.width  = canvasArea.clientWidth;
 canvas.height = canvasArea.clientHeight;
 btnSnapshot.disabled = !state.hasSource;
 if (btnRecord) btnRecord.disabled = !state.hasSource;
+// Autoplay a shader on cold start so the canvas is alive before the user
+// picks a source. Respects any shader the user had active in their last
+// session; falls back to Dive Clouds for first-timers. Skips resetAllState
+// so saved effect knobs are preserved. The render loop self-terminates when
+// the user replaces this with a real source.
+if (!state.hasSource) {
+  const slug = (state.sourceKind === 'shader' && state.shaderSlug)
+    ? state.shaderSlug
+    : 'diveclouds';
+  const def = SHADER_SOURCES.find((s) => s.slug === slug) || SHADER_SOURCES[0];
+  if (def) {
+    const res = SHADER_RES[state.shaderRes] || SHADER_RES.landscape;
+    if (setShaderSource(def.slug, res.w, res.h)) {
+      state.sourceKind = 'shader';
+      state.shaderSlug = def.slug;
+      setHasSource(true, def.label);
+      resizeCanvas();
+      renderShaderSourcePicker();
+    }
+  }
+}
 if (btnExport) btnExport.disabled = !state.hasSource || !exporter.isSupported();
 updateMuteBtn();

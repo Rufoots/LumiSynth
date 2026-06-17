@@ -2,56 +2,56 @@
 
 LumiSynth is a browser-based real-time video instrument built with vanilla JavaScript, raw WebGL2, Canvas 2D, Vite, Playwright, and Cloudflare Pages Functions.
 
-It takes a local video, image, or webcam feed, detects visual regions in real time, tracks them across frames, runs a GPU shader pipeline, and draws expressive tracking overlays on top. The product is designed like a synth: immediate controls, dense but readable UI, and no framework hiding the rendering pipeline.
-
-This repository is useful to review as a frontend systems project, a creative-coding project, and a small product-engineering slice with auth, persistence, tests, and deployment scaffolding.
-
-## Why It Matters In 2026
-
-Modern frontend work is no longer just forms and dashboards. LumiSynth demonstrates the kind of browser engineering that sits between product UI, graphics, performance, local media APIs, and edge-hosted backend services.
+It takes a local video, image, webcam feed, or a generative GLSL shader, runs a GPU effect pipeline, detects and tracks visual regions in real time, and draws expressive overlays on top. The product is designed like a synthesizer: immediate controls, dense but readable UI, no framework hiding the rendering pipeline.
 
 ## Product Snapshot
 
 Users can:
 
-- Upload a video or image, or open a webcam.
-- Choose a STRUCTURE effect for geometry and pattern.
-- Chain up to three COLOR effects in a rack.
+- Upload a video or image, open a webcam, or launch a generative shader (Dive Clouds, Phantom Star, Star Nest, Hyperkart).
+- Choose a STRUCTURE effect for geometry and pattern (ASCII, Erode, Watershed, Pixel Sort, Melt, FreqMod, Motion Edge, and more).
+- Pick a single COLOR effect (Maps, Unique dreamcore pack, or custom Chroma ramp).
+- Fine-tune with the always-on GRADE pass (hue rotate + saturation).
+- Add up to three FX RACK effects: stateful feedback passes (Flow Field, Drag, Luma Drag, Tunnel, Burn-In, Wobble Tape) and stateless signal effects (CRT, Scanlines, Degrade, Noise, and others).
 - Track blobs using motion, luma, dark, saturation, edge, sharp, or color-key detection.
-- Draw overlays: shapes, labels, straight graph lines, and curved hub connections.
-- Add Track FX: echo blobs, radar sweep, and heatmap residue.
-- Save a PNG snapshot or record the canvas as a video clip.
+- Draw overlays: shapes, labels, and line styles (velocity, pulse, constellation, MST, star, hub curves).
+- Add Track FX: echo blobs, radar sweep, heatmap residue.
+- Set an export resolution (720p / 1080p / 4K) before saving a PNG snapshot or recording a video clip.
 - Login for gated exports and cloud preset flows, with local internal login available before the real D1 database is configured.
 
-The media itself stays in the browser. The Cloudflare backend stores account/session data, presets, and export events, not uploaded video files.
+The media stays in the browser. The Cloudflare backend stores account/session data, presets, and export events — not uploaded video files.
 
 ## Architecture
 
 ```text
-Video / image / webcam
-  -> blobDetector.js      CPU detection: motion/luma/dark/sat/edge/sharp/color
+Video / image / webcam / generative shader
+  -> blobDetector.js      CPU detection: motion/luma/dark/sat/edge/sharp/color-key
   -> kalman.js            nearest-neighbor identity tracking + Kalman smoothing
   -> oneEuroFilter.js     display-level smoothing for tracked blobs
-  -> STRUCTURE            WebGL2 full-frame effect
-  -> COLOR rack           0-3 chained WebGL2 color passes
+  -> STRUCTURE            WebGL2 full-frame geometry/pattern effect
+  -> COLOR                single WebGL2 color effect (maps / unique / chroma)
+  -> GRADE                always-on hue-rotate + saturation pass
+  -> FX RACK              0-3 chained WebGL2 passes (feedback or stateless)
   -> PER-BLOB             optional CPU filter inside blob regions
-  -> overlays.js          Canvas 2D shapes, labels, graph lines, Track FX
-  -> Snap / Rec           PNG or MediaRecorder canvas export
+  -> overlays.js          Canvas 2D shapes, labels, line styles, Track FX
+  -> Snap / Rec           PNG or MediaRecorder canvas export at chosen resolution
 ```
 
-The GL modules share one offscreen WebGL2 canvas, one context, one uploaded video texture, one quad VAO, and a pair of chain FBOs. `main.js` orchestrates frame upload, effect dispatch, ping-pong rendering, and final 2D canvas compositing.
+The GL modules share one offscreen WebGL2 canvas, one context, one uploaded video texture, one quad VAO, and a pair of chain FBOs. `main.js` orchestrates frame upload, effect dispatch, ping-pong rendering, and final 2D canvas compositing. FX RACK feedback effects maintain per-slot ping-pong FBO pairs in `glFx.js` for inter-frame accumulation.
 
 ## Technical Highlights
 
 | Area | What to look at |
 |---|---|
-| Real-time rendering | Shared WebGL2 context in `src/glContext.js`, shader dispatch in `src/glFilters.js`, ASCII shader in `src/ascii.js` |
-| Pipeline design | STRUCTURE -> COLOR rack FBO chain in `src/main.js`, compose pass in `src/glCompose.js` |
+| Real-time rendering | Shared WebGL2 context in `src/glContext.js`, shader dispatch in `src/glFilters.js` and `src/glFx.js` |
+| Pipeline design | STRUCTURE → COLOR → GRADE → FX RACK chain in `src/main.js`, compose pass in `src/glCompose.js` |
+| Feedback effects | Per-slot ping-pong FBOs in `src/glFx.js`; `resetFxFeedback()` wired into state resets |
+| Generative sources | Raymarched GLSL library in `src/shaderSource.js`; registry-driven knob panel, own GL context |
 | Tracking | Blob detector in `src/blobDetector.js`, Kalman tracker in `src/kalman.js`, One Euro smoothing in `src/oneEuroFilter.js` |
 | Creative overlays | Track shapes, labels, MST/star/constellation/curved hub lines, echo/radar/heatmap in `src/overlays.js` |
-| Product UI | Rack controls, knobs, sliders, toggles, first-run intro, custom cursor, tooltip system in `index.html`, `src/main.js`, `src/style.css` |
+| Export | Resolution picker (DISP/720p/1080p/4K), quality-labeled filenames, bitrate-scaled MediaRecorder |
 | Backend slice | Cloudflare Pages Function API in `functions/api/[[path]].js`, D1 schema in `migrations/0001_auth_presets.sql` |
-| Quality gates | ESLint, Vite build, Playwright smoke tests |
+| Quality gates | Vite build, Playwright smoke tests |
 
 ## Tech Stack
 
@@ -60,105 +60,47 @@ The GL modules share one offscreen WebGL2 canvas, one context, one uploaded vide
 - Canvas 2D
 - Vite
 - Playwright
-- ESLint
-- Cloudflare Pages Functions
-- Cloudflare D1 schema scaffolding
+- Cloudflare Pages Functions + D1 (scaffolded)
 
-Intentional constraints: no TypeScript, no React/Svelte/Solid, no Tailwind, no shadcn, no three.js. The point is to expose the browser platform directly.
-
-## Adding Shaders With BigBrain Mode
-
-This repo includes a project Cursor skill for adding TouchDesigner-derived shaders. In a Cursor chat, say:
-
-```text
-use BigBrain mode
-```
-
-Then provide the real TouchDesigner GLSL/code, the intended effect slug, whether it should be a `COLOR` rack effect or a `STRUCTURE` effect, and the parameter mapping for `uParams.xyzw`.
-
-BigBrain mode reads `.cursor/skills/bigbrain-mode/WEBGL_REFERENCE.md`, works from a non-`main` branch for shader changes, and wires the effect through the WebGL dispatcher, schemas, UI picker/controls, and verification steps. Do not provide placeholder shader code; incomplete TouchDesigner inputs should be clarified before implementation.
-
-## Current Feature Status
-
-Implemented:
-
-- STRUCTURE effects: ASCII, Erode, Watershed, Pixel Sort, Melt.
-- STRUCTURE output modes: Mono, Source, Ink.
-- COLOR rack with three independent chained slots.
-- Many COLOR shader effects, including oxide, synth, biolum, thermo, falsecolor, bloom, noise, scanlines, degrade, CRT, and others.
-- TRACK mode with detection controls, shapes, labels, graph lines, curved hub lines, and Track FX.
-- Snapshot and recording exports.
-- Cloudflare auth/preset/export API scaffold.
-- Localhost-only internal login fallback for testing gated flows before D1 setup.
-- Playwright smoke tests and ESLint.
-
-Not yet implemented:
-
-- Real GL FX RACK shaders for the main SYNTH pipeline.
-- Final Cloudflare D1 production database binding.
-- Production email provider configuration.
+Intentional constraints: no TypeScript, no React/Svelte/Solid, no Tailwind, no shadcn, no three.js.
 
 ## Run Locally
-
-### For a non-technical Windows user
-
-Double-click `LumiSynth.cmd`.
-
-It will:
-
-1. Check that Node.js is installed.
-2. Install dependencies on first launch.
-3. Open the browser to LumiSynth.
-4. Start the local dev server.
-
-Keep the command window open while using LumiSynth. Close it when finished.
-
-If it says Node.js is missing, install the LTS version from [nodejs.org](https://nodejs.org/), then double-click `LumiSynth.cmd` again.
-
-### Developer commands
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the Vite URL, usually `http://localhost:5173`.
-
-Useful commands:
+Open `http://localhost:5173`.
 
 ```bash
-npm run lint       # ESLint
-npm run build      # production build
+npm run build      # production build → dist/
+npm run preview    # serve dist/ locally
 npm run test:e2e   # Playwright smoke tests
-npm run preview    # preview built dist/
+npm run cf:dev     # Cloudflare Pages local dev (Functions + D1)
+npm run cf:deploy  # deploy to Cloudflare Pages
 ```
 
-## Internal Login Before Cloudflare D1
-
-The frontend includes a localhost-only fallback so gated export and cloud preset UI can be tested before the real Cloudflare D1 database exists.
+## Internal Login (Before Cloudflare D1)
 
 On `localhost` or `127.0.0.1`:
 
-1. Enter an email in the Account panel.
-2. Click `Send Code`.
-3. Use the internal code shown in the toast.
-4. Test Snap/Rec export gating and preset save/load/delete locally.
+1. Enter any email in the Account panel and click **Send Code**.
+2. Use the 6-digit code shown in the toast (no email sent).
+3. Test Snap/Rec export gating and preset save/load/delete locally.
 
-Internal auth and presets are stored in `localStorage`. This is not the production auth path.
+Internal auth and presets are stored in `localStorage`. Not the production auth path.
 
-## Cloudflare Hosting Plan
+## Adding Shaders With BigBrain Mode
 
-Frontend:
+In a Cursor chat, say `use BigBrain mode`, then provide the TouchDesigner GLSL source, the intended effect slug, whether it belongs in STRUCTURE, COLOR, or FX RACK, and the `uParams.xyzw` mapping. BigBrain mode reads `.cursor/skills/bigbrain-mode/WEBGL_REFERENCE.md` and wires the effect through dispatcher, schemas, UI, and verification.
 
-- Cloudflare Pages serves the built Vite app from `dist/`.
+## Cloudflare Hosting
 
-Backend:
+Frontend: Cloudflare Pages serves the built Vite app from `dist/`.
+Backend: `functions/api/[[path]].js` as a Cloudflare Pages Function with D1 binding named `DB`.
 
-- `functions/api/[[path]].js` runs as a Cloudflare Pages Function.
-- D1 binding must be named `DB`.
-- `migrations/0001_auth_presets.sql` defines users, auth challenges, sessions, presets, and export events.
-
-Production env vars expected:
+Production env vars:
 
 ```text
 RESEND_API_KEY
@@ -166,7 +108,13 @@ AUTH_FROM_EMAIL
 APP_ORIGIN
 ```
 
-The real D1 `database_id` is intentionally not committed because it is only known after creating the Cloudflare D1 database.
+The real D1 `database_id` is intentionally not committed — add it after creating the Cloudflare D1 database.
+
+## GitHub Pages
+
+The static frontend is also deployable to GitHub Pages via the included workflow (`.github/workflows/deploy.yml`). Auth and cloud presets require the Cloudflare backend and will not function on GitHub Pages.
+
+Live: `https://sourikduttanyu.github.io/lumisynth/`
 
 ## Code Layout
 
@@ -176,41 +124,34 @@ The real D1 `database_id` is intentionally not committed because it is only know
 ├── src/
 │   ├── main.js              # state, render loop, UI wiring
 │   ├── schemas.js           # defaults, effect schemas, rack factories
+│   ├── shaderSource.js      # generative GLSL source library
+│   ├── glContext.js         # shared WebGL2 context and FBO chain
+│   ├── glCompose.js         # STRUCTURE → COLOR compose pass
+│   ├── glFilters.js         # stateless full-frame GL effects
+│   ├── glFx.js              # stateful FX RACK feedback effects
+│   ├── ascii.js             # WebGL2 ASCII renderer
 │   ├── blobDetector.js      # CPU blob detection modes
 │   ├── kalman.js            # tracker and stable IDs
 │   ├── oneEuroFilter.js     # adaptive display smoothing
 │   ├── overlays.js          # Canvas 2D tracking overlay and Track FX
-│   ├── glContext.js         # shared WebGL2 context and FBO chain
-│   ├── glCompose.js         # STRUCTURE -> COLOR compose pass
-│   ├── glFilters.js         # full-frame GL effects
-│   ├── ascii.js             # WebGL2 ASCII renderer
 │   ├── filters.js           # CPU per-blob filters
 │   └── style.css
 ├── functions/api/[[path]].js
 ├── migrations/0001_auth_presets.sql
 ├── tests/e2e/smoke.spec.js
-├── eslint.config.js
+├── .github/workflows/deploy.yml
+├── vite.config.js
 ├── playwright.config.js
 ├── wrangler.toml
 └── package.json
 ```
 
-## Suggested Review Path
-
-For a quick engineering review:
-
-1. Start with `src/main.js` around the render loop and pipeline dispatch.
-2. Read `src/glContext.js` to see the shared WebGL contract.
-3. Read `src/blobDetector.js` and `src/kalman.js` for tracking.
-4. Read `src/overlays.js` for the TRACK visual layer.
-5. Read `functions/api/[[path]].js` for the edge backend shape.
-
 ## Troubleshooting
 
-**Camera will not open**: allow camera access in the browser permissions.
+**Camera will not open**: allow camera access in browser permissions.
 
-**No blobs appear**: lower threshold, increase max blobs, or switch detection mode. For low-motion footage, try luma, saturation, edge, sharp, or color-key detection.
+**No blobs appear**: lower threshold, increase max blobs, or switch detection mode.
 
-**WebGL effects do not render**: use a browser with WebGL2 support and check the console for shader compile errors.
+**WebGL effects do not render**: use a browser with WebGL2 support; check the console for shader compile errors.
 
-**Cloudflare API unavailable locally**: use normal `npm run dev` with the internal login fallback, or configure Pages Functions/D1 and run the Cloudflare dev path.
+**Cloudflare API unavailable locally**: use `npm run dev` with the internal login fallback, or configure Pages Functions/D1 and run `npm run cf:dev`.

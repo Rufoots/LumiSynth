@@ -263,6 +263,12 @@ html, body {
   color: var(--text-on-display);
 }
 #canvas-topbar .icon-btn:hover { background: oklch(12% 0.005 70); }
+#export-res-select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: var(--space-lg);
+}
 
 /* Record button — Snap's neighbor in the topbar. Has a small dot
    inside the label that pulses red while recording, plus the button
@@ -1843,6 +1849,7 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
   overflow: visible;
   cursor: pointer;
   touch-action: none;
+  contain: layout style;
 }
 .timeline-segment {
   position: absolute;
@@ -1926,6 +1933,7 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
   pointer-events: none;
   transform: translateX(-1px);
   z-index: 2;
+  will-change: left;
 }
 /* FPS overlay — information presented on the canvas, lives on display surface
    per The Display-Vs-Chassis Rule. */
@@ -1952,7 +1960,9 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
 #intro-overlay {
   position: fixed;
   inset: 0;
-  background: oklch(0% 0 0 / 0.68);
+  background: oklch(4% 0.005 250 / 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   z-index: 500;
   display: flex;
   align-items: center;
@@ -2172,7 +2182,7 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
   left: 0;
   width: 18px;
   height: 18px;
-  background: var(--text-key);
+  background: oklch(97% 0.005 70);
   border: none;
   border-radius: 50%;
   pointer-events: none;
