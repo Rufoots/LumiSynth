@@ -81,6 +81,28 @@ npm run cf:dev     # Cloudflare Pages local dev (Functions + D1)
 npm run cf:deploy  # deploy to Cloudflare Pages
 ```
 
+## Object Tracking (MediaPipe)
+
+TRACK mode has two detection backends, picked under **DETECTION → Backend**:
+
+- **Blob** — the original grid detector (motion / luma / dark / sat / edge / sharp).
+- **Object** — Google MediaPipe object detection. Tracks recognizable objects
+  (person, car, …) as bounding boxes that flow into the same overlays and Track FX.
+  Pick **GPU** (faster) or **CPU** (avoids competing with the effect pipeline for the
+  GPU) under **Delegate**.
+
+Nothing extra to install — the MediaPipe runtime and the EfficientDet model are
+**bundled in `public/mediapipe/`** (committed to the repo), so object tracking works
+offline after the first `npm install`.
+
+Maintainers refreshing those vendored assets after a `@mediapipe/tasks-vision` bump:
+
+```bash
+cp node_modules/@mediapipe/tasks-vision/wasm/* public/mediapipe/wasm/
+curl -L -o public/mediapipe/efficientdet_lite0.tflite \
+  https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite
+```
+
 ## Internal Login (Before Cloudflare D1)
 
 On `localhost` or `127.0.0.1`:

@@ -12,6 +12,7 @@ import * as audioReactive from './audioReactive.js';
 import * as exporter from './exporter.js';
 import { applyCompose } from './glCompose.js';
 import { BlobOneEuroFilter } from './oneEuroFilter.js';
+import { initObjectDetector, setObjectDetectorDelegate, detectObjects, isObjectDetectorReady } from './mediapipeTracker.js';
 import {
   STORAGE_KEY, RACK_SLOTS, DEFAULTS, TIMELINE_DEFAULTS, TIMELINE_MIN_SEGMENT_SECONDS,
   COLOR_PARAM_SCHEMAS, FX_PARAM_SCHEMAS, TRACK_FX_PARAM_SCHEMAS,
@@ -21,6 +22,28 @@ import {
   makeFxFactoryParams, makeFxRack,
   makeTrackFxFactoryParams, makeTrackFxRack,
 } from './schemas.js';
+
+// GL error surface — GL modules call this to fire a user-visible toast on
+// shader compile failure (avoids importing showToast into GL modules).
+window.__lumiGLError = (msg) => { if (typeof showToast === 'function') showToast(msg, 'error'); };
+
+// ---- Focus trap utility ----
+function trapFocus(el) {
+  el._trapHandler = (e) => {
+    if (e.key !== 'Tab') return;
+    const nodes = [...el.querySelectorAll(
+      'button:not([disabled]),input:not([disabled]),[tabindex="0"]'
+    )].filter(n => !n.closest('.hidden'));
+    if (!nodes.length) return;
+    const first = nodes[0], last = nodes[nodes.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  el.addEventListener('keydown', el._trapHandler);
+}
+function releaseTrap(el) {
+  if (el._trapHandler) { el.removeEventListener('keydown', el._trapHandler); el._trapHandler = null; }
+}
 
 // state.sourceKind tracks which input element is currently driving the chain:
 //   null    — no source loaded
@@ -32,6 +55,13 @@ const state = {
   ...DEFAULTS,
   hasSource: false,
   sourceKind: null,
+  // TRACK detection backend (global runtime, NOT look-scoped — deliberately
+  // kept out of DEFAULTS so it doesn't become per-timeline-segment).
+  //   trackBackend: 'blob'   — grid local-maxima (blobDetector.js)
+  //               | 'object' — MediaPipe object detection (mediapipeTracker.js)
+  //   mpDelegate:   'GPU' | 'CPU' — MediaPipe inference delegate
+  trackBackend: 'blob',
+  mpDelegate: 'GPU',
   // Per-effect knob memory for the single COLOR stage: { [effect]: params }.
   // Lazily seeded with factory defaults on first pick (getColorParams).
   colorParams: {},
@@ -1006,6 +1036,8 @@ function initKnob(el, opts = {}) {
       case 'PageDown':   next = currentValue - big;  break;
       case 'Home':       next = min; break;
       case 'End':        next = max; break;
+      case 'Delete':
+      case 'Backspace':  setValue(def); e.preventDefault(); return;
       default: return;
     }
     e.preventDefault();
@@ -1160,6 +1192,8 @@ const TOGGLE_CONFIG = [
   ['erode-mode-group',      'erodeMode',      parseInt,   null],
   // ============ TRACK-mode toggle groups ============
   ['mode-group',            'mode',           String,     onModeChange],
+  ['track-backend-group',   'trackBackend',   String,     onTrackBackendChange],
+  ['mp-delegate-group',     'mpDelegate',     String,     onMpDelegateChange],
   ['track-composite-group', 'trackComposite', String,     null],
   ['lumi-channel-group',    'trackChannel',   String,     (v) => { resetFrameHistory(); refreshColorKeyControls(v); }],
   ['track-shape-group',     'trackShape',     String,     null],
@@ -1248,6 +1282,41 @@ function refreshColorKeyControls(channel) {
   if (el) el.style.display = channel === 'color' ? '' : 'none';
 }
 
+// Detection-backend visibility: object detection doesn't use the lumi-channel
+// or color-key controls (those are blob-detector knobs), and the GPU/CPU
+// delegate toggle only matters for the object backend. Hide accordingly.
+function refreshBackendControls(backend) {
+  const isObj = backend === 'object';
+  const lumi = document.getElementById('lumi-channel-section');
+  if (lumi) lumi.style.display = isObj ? 'none' : '';
+  const del = document.getElementById('mp-delegate-section');
+  if (del) del.style.display = isObj ? '' : 'none';
+  if (isObj) { const ck = document.getElementById('color-key-controls'); if (ck) ck.style.display = 'none'; }
+  else refreshColorKeyControls(state.trackChannel);
+}
+
+// Lazily build the object detector. Idempotent (initObjectDetector no-ops when
+// already ready on the same delegate). `notify` shows load toasts only for
+// user-initiated switches — suppressed during bulk applyStateToUI.
+function ensureObjectBackend(notify) {
+  if (isObjectDetectorReady()) return;
+  if (notify) showToast('Loading object model…', 'info', 2500);
+  initObjectDetector(state.mpDelegate)
+    .then(() => { if (notify) showToast('Object model ready', 'ok', 1500); })
+    .catch(() => showToast('Object model failed to load', 'error', 3500));
+}
+
+function onTrackBackendChange(v) {
+  refreshBackendControls(v);
+  if (v === 'object') ensureObjectBackend(!_applyingState);
+}
+
+function onMpDelegateChange(v) {
+  if (state.trackBackend === 'object') {
+    setObjectDetectorDelegate(v).catch(() => showToast('Delegate switch failed', 'error', 3000));
+  }
+}
+
 // Mode toggle. Drives section visibility via body[data-mode] (the CSS
 // rule [data-mode-section="track"] / [data-mode-section="synth"] reacts
 // to this attribute). Also resets per-source overlay state when leaving
@@ -1265,8 +1334,12 @@ function setToggleGroupValue(groupId, value) {
   group.querySelectorAll('.toggle-btn').forEach(b => {
     const match = b.dataset.value === String(value);
     b.classList.toggle('active', match);
-    if (isRadio) b.setAttribute('aria-checked', match ? 'true' : 'false');
-    else         b.setAttribute('aria-pressed', match ? 'true' : 'false');
+    if (isRadio) {
+      b.setAttribute('aria-checked', match ? 'true' : 'false');
+      b.tabIndex = match ? 0 : -1;
+    } else {
+      b.setAttribute('aria-pressed', match ? 'true' : 'false');
+    }
   });
 }
 
@@ -1289,6 +1362,7 @@ function wireToggleGroup(groupId, stateKey, parser, onChange) {
     const next = e.key === 'ArrowRight'
       ? (i + 1) % buttons.length
       : (i - 1 + buttons.length) % buttons.length;
+    buttons.forEach((b, idx) => { if (group.getAttribute('role') === 'radiogroup') b.tabIndex = idx === next ? 0 : -1; });
     buttons[next].focus();
     buttons[next].click();
     e.preventDefault();
@@ -1448,6 +1522,7 @@ function setColor(type) {
   if (type !== 'none') getColorParams(type);
   renderColorPanel();
   schedulePersist();
+  if (fileStatus) fileStatus.textContent = type === 'none' ? 'Color: none' : `Color: ${COLOR_LABEL[type] || type}`;
 }
 
 // Activation from a secondary interaction (knob drag, ramp-stop input,
@@ -1833,6 +1908,13 @@ buildFxPicker();
 let _openFxPickerSlotId = null;
 const _expandedFxSlots  = new Set();
 
+function swapFxSlots(a, b) {
+  if (a < 0 || b < 0 || a >= state.fxRack.length || b >= state.fxRack.length) return;
+  [state.fxRack[a], state.fxRack[b]] = [state.fxRack[b], state.fxRack[a]];
+  renderFxRack();
+  schedulePersist();
+}
+
 function renderFxRack() {
   if (!fxRackEl) return;
   fxRackEl.innerHTML = '';
@@ -1858,9 +1940,14 @@ function renderFxRack() {
     const handle = document.createElement('button');
     handle.type = 'button';
     handle.className = 'color-rack-handle';
-    handle.setAttribute('aria-label', 'Drag to reorder slot');
-    handle.dataset.tip = 'Drag to reorder this FX stage in the chain.';
+    handle.setAttribute('aria-label', `Reorder FX slot ${i + 1}. Use arrow keys to move.`);
+    handle.dataset.tip = 'Drag to reorder this FX stage in the chain. Arrow keys also work when focused.';
     handle.textContent = '≡';
+    handle.addEventListener('keydown', (ev) => {
+      const idx = parseInt(handle.closest('.color-rack-slot').dataset.slotIdx, 10);
+      if (ev.key === 'ArrowUp' && idx > 0) { swapFxSlots(idx, idx - 1); ev.preventDefault(); }
+      else if (ev.key === 'ArrowDown' && idx < state.fxRack.length - 1) { swapFxSlots(idx, idx + 1); ev.preventDefault(); }
+    });
     row.appendChild(handle);
 
     const chip = document.createElement('button');
@@ -2049,9 +2136,11 @@ function reorderFxSlot(srcIdx, dstIdx) {
   schedulePersist();
 }
 
+let _fxPickerFocusPrior = null;
 function openFxPicker(slotEl) {
   const slotId = slotEl.dataset.slotId;
   _openFxPickerSlotId = slotId;
+  _fxPickerFocusPrior = document.activeElement;
   const r = slotEl.getBoundingClientRect();
   fxPickerEl.classList.remove('hidden');
   const pr = fxPickerEl.getBoundingClientRect();
@@ -2063,6 +2152,7 @@ function openFxPicker(slotEl) {
   fxPickerEl.style.left = `${left}px`;
   const chip = slotEl.querySelector('.color-rack-chip');
   if (chip) chip.setAttribute('aria-expanded', 'true');
+  fxPickerEl.querySelector('button')?.focus();
 }
 function closeFxPicker() {
   if (!_openFxPickerSlotId) return;
@@ -2071,6 +2161,8 @@ function closeFxPicker() {
   for (const chip of fxRackEl.querySelectorAll('.color-rack-chip')) {
     chip.setAttribute('aria-expanded', 'false');
   }
+  _fxPickerFocusPrior?.focus();
+  _fxPickerFocusPrior = null;
 }
 
 fxRackEl?.addEventListener('click', (e) => {
@@ -2386,9 +2478,11 @@ function reorderTrackFxSlot(srcIdx, dstIdx) {
   schedulePersist();
 }
 
+let _trackFxPickerFocusPrior = null;
 function openTrackFxPicker(slotEl) {
   const slotId = slotEl.dataset.slotId;
   _openTrackFxPickerSlotId = slotId;
+  _trackFxPickerFocusPrior = document.activeElement;
   const r = slotEl.getBoundingClientRect();
   trackFxPickerEl.classList.remove('hidden');
   const pr = trackFxPickerEl.getBoundingClientRect();
@@ -2400,6 +2494,7 @@ function openTrackFxPicker(slotEl) {
   trackFxPickerEl.style.left = `${left}px`;
   const chip = slotEl.querySelector('.color-rack-chip');
   if (chip) chip.setAttribute('aria-expanded', 'true');
+  trackFxPickerEl.querySelector('button')?.focus();
 }
 function closeTrackFxPicker() {
   if (!_openTrackFxPickerSlotId) return;
@@ -2408,6 +2503,8 @@ function closeTrackFxPicker() {
   for (const chip of trackFxRackEl.querySelectorAll('.color-rack-chip')) {
     chip.setAttribute('aria-expanded', 'false');
   }
+  _trackFxPickerFocusPrior?.focus();
+  _trackFxPickerFocusPrior = null;
 }
 
 trackFxRackEl?.addEventListener('click', (e) => {
@@ -2597,6 +2694,10 @@ function loadPersistedState() {
     if (parsed.fxRack) parsed.fxRack = sanitizeFxRack(parsed.fxRack);
     if (parsed.timelineSegments) parsed.timelineSegments = sanitizeTimelineSegments(parsed.timelineSegments);
     for (const k of Object.keys(DEFAULTS)) if (k in parsed) state[k] = parsed[k];
+    // Detection backend lives outside DEFAULTS (global runtime, not look-scoped),
+    // so restore it explicitly with validation.
+    if (parsed.trackBackend === 'blob' || parsed.trackBackend === 'object') state.trackBackend = parsed.trackBackend;
+    if (parsed.mpDelegate === 'GPU' || parsed.mpDelegate === 'CPU') state.mpDelegate = parsed.mpDelegate;
     if (parsed.colorParams)  state.colorParams  = parsed.colorParams;
     if (parsed.fxRack)       state.fxRack       = parsed.fxRack;
     if (parsed.trackFxRack)  state.trackFxRack  = parsed.trackFxRack;
@@ -3388,24 +3489,41 @@ function introDismissed() {
   catch (_) { return false; }
 }
 
+let _introFocusPrior = null;
 function dismissIntro() {
   if (!introOverlay) return;
   introOverlay.classList.add('hidden');
+  releaseTrap(introOverlay);
+  _introFocusPrior?.focus();
+  _introFocusPrior = null;
   try { localStorage.setItem(INTRO_DISMISSED_KEY, 'true'); } catch (_) {}
 }
 
 function showIntroIfNeeded() {
   if (!introOverlay || introDismissed()) return;
+  _introFocusPrior = document.activeElement;
   introOverlay.classList.remove('hidden');
   if (introStart) introStart.focus();
+  trapFocus(introOverlay);
 }
 
 introClose?.addEventListener('click', dismissIntro);
 introStart?.addEventListener('click', dismissIntro);
 introOverlay?.addEventListener('click', (e) => { if (e.target === introOverlay) dismissIntro(); });
 
-function openHelp()  { helpOverlay.classList.remove('hidden'); helpClose.focus(); }
-function closeHelp() { helpOverlay.classList.add('hidden'); }
+let _helpFocusPrior = null;
+function openHelp() {
+  _helpFocusPrior = document.activeElement;
+  helpOverlay.classList.remove('hidden');
+  helpClose.focus();
+  trapFocus(helpOverlay);
+}
+function closeHelp() {
+  helpOverlay.classList.add('hidden');
+  releaseTrap(helpOverlay);
+  _helpFocusPrior?.focus();
+  _helpFocusPrior = null;
+}
 btnHelp.addEventListener('click', openHelp);
 helpClose.addEventListener('click', closeHelp);
 helpOverlay.addEventListener('click', (e) => { if (e.target === helpOverlay) closeHelp(); });
@@ -3435,36 +3553,39 @@ btnFps.addEventListener('click', () => {
 
 // ---- Keyboard shortcuts (global) ----
 document.addEventListener('keydown', (e) => {
-  // Ignore when typing in input/textarea or interacting with knob/toggle
+  // Ignore when typing in input/textarea
   const tag = (document.activeElement?.tagName || '').toLowerCase();
   const activeParamControl = document.activeElement?.dataset?.knob !== undefined
     || document.activeElement?.classList?.contains('knob');
   if ((tag === 'input' && !activeParamControl) || tag === 'textarea') return;
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
 
-  if (e.key === ' ' && tag !== 'button') {
+  // Space: play/pause (unmodified, no AT collision)
+  if (e.key === ' ' && tag !== 'button' && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     if (video.paused) { video.play().catch(() => {}); } else { video.pause(); }
     return;
   }
-  if (e.key === 'Escape' && introOverlay && !introOverlay.classList.contains('hidden')) {
-    dismissIntro(); e.preventDefault(); return;
+  // Escape: close overlays (unmodified)
+  if (e.key === 'Escape' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (introOverlay && !introOverlay.classList.contains('hidden')) { dismissIntro(); e.preventDefault(); return; }
+    if (!helpOverlay.classList.contains('hidden')) { closeHelp(); e.preventDefault(); return; }
   }
-  if (e.key === 'Escape' && !helpOverlay.classList.contains('hidden')) {
-    closeHelp(); e.preventDefault(); return;
-  }
-  if (e.key === '?' || (e.key === '/' && e.shiftKey)) { openHelp(); e.preventDefault(); return; }
-  if ((e.key === 's' || e.key === 'S') && !activeParamControl) {
-    if (!document.activeElement?.classList?.contains('knob')) { takeSnapshot(); e.preventDefault(); }
-    return;
-  }
-  if ((e.key === 'f' || e.key === 'F') && !activeParamControl) {
-    btnFps.click(); e.preventDefault();
-  }
-  if ((e.key === 'r' || e.key === 'R') && !activeParamControl) {
-    if (btnRecord && !btnRecord.disabled && btnRecord.style.display !== 'none') {
-      btnRecord.click();
-      e.preventDefault();
+
+  // Ctrl/Cmd modifier shortcuts — safe from AT browse-mode key conflicts
+  if (e.ctrlKey || e.metaKey) {
+    switch (e.key.toLowerCase()) {
+      case '/':
+        openHelp(); e.preventDefault(); return;
+      case 's':
+        if (!activeParamControl) { takeSnapshot(); e.preventDefault(); }
+        return;
+      case 'f':
+        btnFps.click(); e.preventDefault(); return;
+      case 'r':
+        if (btnRecord && !btnRecord.disabled && btnRecord.style.display !== 'none') {
+          btnRecord.click(); e.preventDefault();
+        }
+        return;
     }
   }
 });
@@ -3557,9 +3678,20 @@ function loadVideoSource(url, label) {
   video.loop = true;
   video.play().catch(() => {});
   resetAllState();
+  state.timelineSegments = [];
+  state.selectedTimelineSegmentId = null;
   state.sourceKind = 'video';
   setHasSource(true, label || 'Video');
   renderTimelinePanel();
+  video.addEventListener('loadedmetadata', () => {
+    if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+    const seg = makeTimelineSegment(0, video.duration / 2);
+    state.timelineSegments.push(seg);
+    selectTimelineSegment(seg.id, { applyLook: false });
+    renderTimelinePanel();
+    schedulePersist();
+    if (fileStatus) fileStatus.textContent = `Segment 1 created: ${formatTime(0)}–${formatTime(seg.end)}`;
+  }, { once: true });
 }
 
 function loadImageSource(url, label) {
@@ -3610,6 +3742,7 @@ function loadShaderSource(slug) {
   resetAllState();
   state.sourceKind = 'shader';
   state.shaderSlug = slug;
+  state.shaderAutoplay = true;
   setHasSource(true, def.label);
   renderTimelinePanel();
   resizeCanvas();
@@ -3634,7 +3767,16 @@ function renderShaderSourcePicker() {
     const span = document.createElement('span');
     span.textContent = def.label;
     btn.appendChild(span);
-    btn.addEventListener('click', () => loadShaderSource(def.slug));
+    btn.addEventListener('click', () => {
+      if (state.sourceKind === 'shader' && state.shaderSlug === def.slug) {
+        state.shaderSlug = null;
+        state.shaderAutoplay = false;
+        setHasSource(false);
+        schedulePersist();
+      } else {
+        loadShaderSource(def.slug);
+      }
+    });
     group.appendChild(btn);
   }
   renderShaderKnobs();
@@ -3821,6 +3963,11 @@ function updateTimelinePlayhead(time = video.currentTime, activeId = _lastResolv
   }
   const pct = clamp(time / video.duration, 0, 1) * 100;
   timelinePlayhead.style.left = `${pct}%`;
+  // Update slider ARIA for keyboard/AT users
+  const dur = video.duration || 0;
+  timelineTrack.setAttribute('aria-valuemax', String(Math.round(dur)));
+  timelineTrack.setAttribute('aria-valuenow', String(Math.round(time)));
+  timelineTrack.setAttribute('aria-valuetext', `${formatTime(time)} / ${formatTime(dur)}`);
   if (activeId !== _lastPlayheadActiveId) {
     _lastPlayheadActiveId = activeId;
     for (const el of timelineTrack.querySelectorAll('.timeline-segment')) {
@@ -3996,6 +4143,7 @@ function addTimelineSegment() {
   state.timelineSegments.push(seg);
   sortTimelineInPlace();
   selectTimelineSegment(seg.id, { applyLook: false });
+  if (fileStatus) fileStatus.textContent = `Segment added: ${formatTime(seg.start)}–${formatTime(seg.end)}`;
 }
 
 function duplicateTimelineSegment() {
@@ -4044,6 +4192,26 @@ timelineAdd?.addEventListener('click', addTimelineSegment);
 timelineDuplicate?.addEventListener('click', duplicateTimelineSegment);
 timelineDelete?.addEventListener('click', deleteTimelineSegment);
 timelineCapture?.addEventListener('click', captureSelectedTimelineLook);
+
+// Keyboard scrubbing for timeline track (accessibility)
+if (timelineTrack) {
+  timelineTrack.setAttribute('role', 'slider');
+  timelineTrack.setAttribute('aria-label', 'Playback position');
+  timelineTrack.setAttribute('aria-valuemin', '0');
+  timelineTrack.setAttribute('aria-valuenow', '0');
+  timelineTrack.setAttribute('aria-valuemax', '0');
+  timelineTrack.setAttribute('tabindex', '0');
+  timelineTrack.addEventListener('keydown', (e) => {
+    if (!timelineAvailable()) return;
+    const step = 5;
+    if      (e.key === 'ArrowLeft')  video.currentTime = Math.max(0, video.currentTime - step);
+    else if (e.key === 'ArrowRight') video.currentTime = Math.min(video.duration, video.currentTime + step);
+    else if (e.key === 'Home')       video.currentTime = 0;
+    else if (e.key === 'End')        video.currentTime = video.duration;
+    else return;
+    e.preventDefault();
+  });
+}
 
 // The track doubles as the scrubber: pointer down on empty track seeks, and
 // keeping the pointer down keeps scrubbing. Segments swallow their own
@@ -4452,23 +4620,35 @@ function renderFrame(nowDOMHi) {
     // a deliberate v2 follow-up — out of scope for this image-input pass.)
     if (!activeSourcePaused()) {
       offCtx.drawImage(srcEl, 0, 0, ow, oh);
-      const offImageData = offCtx.getImageData(0, 0, ow, oh);
 
       frameCount++;
       if (frameCount % Math.max(1, look.updateInterval) === 0) {
-        const minSizeDetect = look.trackMinSize * detectScale;
         const cap = Math.min(30, look.trackMaxBlobs);
-        if (look.trackChannel === 'color') {
-          const hex = look.colorKeyHex.replace('#', '');
-          const cr = parseInt(hex.slice(0, 2), 16);
-          const cg = parseInt(hex.slice(2, 4), 16);
-          const cb = parseInt(hex.slice(4, 6), 16);
-          setColorKeyTarget(cr, cg, cb, look.colorKeyHueTol, look.colorKeySatMin, 0.10);
-        } else {
-          clearColorKeyTarget();
-        }
-        const rawBlobs  = detectBlobs(offImageData, look.threshold, cap, look.trackChannel, minSizeDetect);
         const sx = cw / ow, sy = ch / oh;
+        let rawBlobs;
+        if (state.trackBackend === 'object') {
+          // MediaPipe object detection on the same downscaled frame. Maps to
+          // the blob shape; reuses look.threshold (→ scoreThreshold) and
+          // trackMaxBlobs (→ maxResults) so no new knobs are needed.
+          if (!isObjectDetectorReady()) { rawBlobs = []; }
+          else {
+            const scoreThreshold = Math.min(0.9, Math.max(0.05, look.threshold / 100));
+            rawBlobs = detectObjects(offscreen, performance.now(), { scoreThreshold, maxResults: cap });
+          }
+        } else {
+          const minSizeDetect = look.trackMinSize * detectScale;
+          const offImageData = offCtx.getImageData(0, 0, ow, oh);
+          if (look.trackChannel === 'color') {
+            const hex = look.colorKeyHex.replace('#', '');
+            const cr = parseInt(hex.slice(0, 2), 16);
+            const cg = parseInt(hex.slice(2, 4), 16);
+            const cb = parseInt(hex.slice(4, 6), 16);
+            setColorKeyTarget(cr, cg, cb, look.colorKeyHueTol, look.colorKeySatMin, 0.10);
+          } else {
+            clearColorKeyTarget();
+          }
+          rawBlobs = detectBlobs(offImageData, look.threshold, cap, look.trackChannel, minSizeDetect);
+        }
         const scaledRaw = rawBlobs.map(b => ({
           ...b, x: b.x*sx, y: b.y*sy, w: b.w*sx, h: b.h*sy, cx: b.cx*sx, cy: b.cy*sy,
         }));
@@ -4948,26 +5128,6 @@ canvas.width  = canvasArea.clientWidth;
 canvas.height = canvasArea.clientHeight;
 btnSnapshot.disabled = !state.hasSource;
 if (btnRecord) btnRecord.disabled = !state.hasSource;
-// Autoplay a shader on cold start so the canvas is alive before the user
-// picks a source. Respects any shader the user had active in their last
-// session; falls back to Dive Clouds for first-timers. Skips resetAllState
-// so saved effect knobs are preserved. The render loop self-terminates when
-// the user replaces this with a real source.
-if (!state.hasSource) {
-  const slug = (state.sourceKind === 'shader' && state.shaderSlug)
-    ? state.shaderSlug
-    : 'diveclouds';
-  const def = SHADER_SOURCES.find((s) => s.slug === slug) || SHADER_SOURCES[0];
-  if (def) {
-    const res = SHADER_RES[state.shaderRes] || SHADER_RES.landscape;
-    if (setShaderSource(def.slug, res.w, res.h)) {
-      state.sourceKind = 'shader';
-      state.shaderSlug = def.slug;
-      setHasSource(true, def.label);
-      resizeCanvas();
-      renderShaderSourcePicker();
-    }
-  }
-}
+// No autoplay on cold start — user must explicitly pick a shader from the library.
 if (btnExport) btnExport.disabled = !state.hasSource || !exporter.isSupported();
 updateMuteBtn();
